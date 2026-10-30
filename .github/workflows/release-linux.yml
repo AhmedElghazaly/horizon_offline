@@ -1,0 +1,103 @@
+name: release-linux
+# Builds the Linux launcher binaries and publishes them on a GitHub Release.
+# Runs when a Release is published (or a prerelease/draft is released) and by hand
+# (`gh workflow run release-linux`). The build follows the same recipe as launcher.yml's
+# linux matrix entry: ubuntu-22.04, the GPUI system libraries, a static C runtime and a
+# plain `cargo build --release` in the launcher/ workspace, packaged as
+# horizon-launcher-linux-x86_64.tar.gz.
+# On a tag-triggered run the asset is attached to that tag's Release; a hand-started run
+# without a tag builds the branch it was started on and uploads it as a workflow artifact
+# only (nothing is published).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      # Optional: an existing tag's Release to attach the asset to; empty means artifact only.
+      release_tag:
+        description: Existing release tag to upload the asset to (leave empty for artifact only)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-linux-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Test runs never reach the telemetry server (docs/telemetry.md).
+  HORIZON_TELEMETRY_URL: "off"
+  # Where launcher self-updates look for new releases: this repository, so builds shipped from
+  # here update from us. The launcher's compiled-in default is the upstream fork's repo;
+  # override it here (or your own owner/repo) if you re-publish elsewhere.
+  HORIZON_LAUNCHER_REPO: ${{ github.repository }}
+
+jobs:
+  build-linux:
+    name: build linux x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      ASSET: horizon-launcher-linux-x86_64.tar.gz
+      BINARY: horizon-launcher
+      # Link the C runtime in statically, as launcher.yml does for its releases: the binary
+      # then runs on any glibc at least as old as the runner's.
+      RUSTFLAGS: -C target-feature=+crt-static
+    defaults:
+      run:
+        working-directory: launcher
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher
+          shared-key: launcher-linux-release
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libfontconfig-dev \
+            libvulkan-dev \
+            libasound2-dev
+      - name: Build
+        run: cargo build --release --locked
+      - name: Check the built version
+        run: |
+          out=$(target/release/$BINARY --version)
+          echo "$out"
+          [[ "$out" == "horizon-launcher "* ]] || { echo "::error::unexpected --version output: $out"; exit 1; }
+      - name: Package
+        run: |
+          rm -rf dist out && mkdir -p dist out
+          cp target/release/$BINARY dist/
+          (cd dist && tar czf ../out/$ASSET $BINARY)
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-launcher-linux-x86_64
+          path: launcher/out/horizon-launcher-linux-x86_64.tar.gz
+          if-no-files-found: error
+      - name: Upload to the Release
+        # Only when a Release exists: the one this run was triggered by, or the tag given to
+        # a hand-started run.
+        if: >-
+          github.event_name == 'release' ||
+          (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          cd launcher
+          gh release upload "$TAG" "out/$ASSET" --clobber

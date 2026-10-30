@@ -1,0 +1,88 @@
+From 15efa8e151b8be35fd19eeea98362d49144d3758 Mon Sep 17 00:00:00 2001
+From: "qwen.ai[bot]" <qwenlm-intl@service.alibaba.com>
+Date: Fri, 30 Oct 2026 09:46:54 +0000
+Subject: [PATCH 2/2] Point launcher self-updates at this repository via
+ HORIZON_LAUNCHER_REPO build override
+
+---
+ .github/workflows/release-linux.yml |  4 ++++
+ launcher/src/backend.rs             | 20 ++++++++++++--------
+ 2 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/.github/workflows/release-linux.yml b/.github/workflows/release-linux.yml
+index 997cf18..e0ce4c1 100644
+--- a/.github/workflows/release-linux.yml
++++ b/.github/workflows/release-linux.yml
+@@ -31,6 +31,10 @@ concurrency:
+ env:
+   # Test runs never reach the telemetry server (docs/telemetry.md).
+   HORIZON_TELEMETRY_URL: "off"
++  # Where launcher self-updates look for new releases: this repository, so builds shipped from
++  # here update from us. The launcher's compiled-in default is the upstream fork's repo;
++  # override it here (or your own owner/repo) if you re-publish elsewhere.
++  HORIZON_LAUNCHER_REPO: ${{ github.repository }}
+ 
+ jobs:
+   build-linux:
+diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
+index 63673fe..b4174b9 100644
+--- a/launcher/src/backend.rs
++++ b/launcher/src/backend.rs
+@@ -10,13 +10,12 @@ use std::sync::mpsc::Sender;
+ use std::sync::{Arc, Mutex};
+ 
+ pub const REPO: &str = "horizon-rust/horizon";
+-pub const LAUNCHER_REPO: &str = "0CYBER/horizon-free";
+ pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/launcher/README.md";
+ /// The players' page on connecting an AI agent (the website's docs/agents.md).
+ pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
+ /// This launcher's version: the release workflow sets `HORIZON_LAUNCHER_VERSION` from the
+ /// tag it builds (no version-bump commits); other builds say Cargo.toml's.
+-pub const VERSION: &str = version_or(option_env!("HORIZON_LAUNCHER_VERSION"));
++pub const VERSION: &str = version_or(option_env!("HORIZON_LAUNCHER_VERSION"), env!("CARGO_PKG_VERSION"));
+ /// Launcher releases are tagged `launcher@X.Y.Z` from 0.2 on (docs/versioning.md), and Horizon's
+ /// own `vX.Y.Z`. Before 0.2 they were `launcher-vX.Y.Z` and `vYYYY.MM.DD[.N]`: every 0.2 tag is
+ /// newer than every one of those ([`release_order`]).
+@@ -24,10 +23,10 @@ pub const LAUNCHER_TAG_PREFIX: &str = "launcher@";
+ /// The launcher tags from before 0.2 (`launcher-v0.16.0`).
+ pub const OLD_LAUNCHER_TAG_PREFIX: &str = "launcher-v";
+ 
+-const fn version_or(injected: Option<&'static str>) -> &'static str {
++const fn version_or(injected: Option<&'static str>, default: &'static str) -> &'static str {
+     match injected {
+         Some(v) if !v.is_empty() => v,
+-        _ => env!("CARGO_PKG_VERSION"),
++        _ => default,
+     }
+ }
+ 
+@@ -263,7 +262,12 @@ fn release_list() -> Result<serde_json::Value, String> {
+     get(&url)?.into_json().map_err(|e| e.to_string())
+ }
+ 
+-/// Launcher releases live in the fork's own repository.
++/// The repository launcher updates come from: a `HORIZON_LAUNCHER_REPO` build-time override
++/// (set by our release workflow), else the fork this launcher is built from.
++pub const LAUNCHER_REPO: &str =
++    version_or(option_env!("HORIZON_LAUNCHER_REPO"), "0CYBER/horizon-free");
++
++/// Launcher releases live in [`LAUNCHER_REPO`]'s own repository.
+ fn launcher_release_list() -> Result<serde_json::Value, String> {
+     let url = format!("https://api.github.com/repos/{LAUNCHER_REPO}/releases?per_page=100");
+     get(&url)?.into_json().map_err(|e| e.to_string())
+@@ -3629,9 +3633,9 @@ pub fn {f}("
+ 
+     #[test]
+     fn the_version_is_the_one_the_release_workflow_injects() {
+-        assert_eq!(version_or(Some("0.4.2")), "0.4.2");
+-        assert_eq!(version_or(Some("")), env!("CARGO_PKG_VERSION"));
+-        assert_eq!(version_or(None), env!("CARGO_PKG_VERSION"));
++        assert_eq!(version_or(Some("0.4.2"), "x"), "0.4.2");
++        assert_eq!(version_or(Some(""), "x"), "x");
++        assert_eq!(version_or(None, "x"), "x");
+         assert_eq!(
+             VERSION,
+             option_env!("HORIZON_LAUNCHER_VERSION")
+-- 
+2.39.5
+
