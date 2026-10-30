@@ -15,7 +15,7 @@ pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/
 pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
 /// This launcher's version: the release workflow sets `HORIZON_LAUNCHER_VERSION` from the
 /// tag it builds (no version-bump commits); other builds say Cargo.toml's.
-pub const VERSION: &str = version_or(option_env!("HORIZON_LAUNCHER_VERSION"));
+pub const VERSION: &str = version_or(option_env!("HORIZON_LAUNCHER_VERSION"), env!("CARGO_PKG_VERSION"));
 /// Launcher releases are tagged `launcher@X.Y.Z` from 0.2 on (docs/versioning.md), and Horizon's
 /// own `vX.Y.Z`. Before 0.2 they were `launcher-vX.Y.Z` and `vYYYY.MM.DD[.N]`: every 0.2 tag is
 /// newer than every one of those ([`release_order`]).
@@ -23,10 +23,10 @@ pub const LAUNCHER_TAG_PREFIX: &str = "launcher@";
 /// The launcher tags from before 0.2 (`launcher-v0.16.0`).
 pub const OLD_LAUNCHER_TAG_PREFIX: &str = "launcher-v";
 
-const fn version_or(injected: Option<&'static str>) -> &'static str {
+const fn version_or(injected: Option<&'static str>, default: &'static str) -> &'static str {
     match injected {
         Some(v) if !v.is_empty() => v,
-        _ => env!("CARGO_PKG_VERSION"),
+        _ => default,
     }
 }
 
@@ -262,6 +262,23 @@ fn release_list() -> Result<serde_json::Value, String> {
     get(&url)?.into_json().map_err(|e| e.to_string())
 }
 
+/// The repository launcher updates come from: a `HORIZON_LAUNCHER_REPO` build-time override
+/// (set by our release workflow), else the fork this launcher is built from.
+pub const LAUNCHER_REPO: &str =
+    version_or(option_env!("HORIZON_LAUNCHER_REPO"), "0CYBER/horizon-free");
+
+/// Launcher releases live in [`LAUNCHER_REPO`]'s own repository.
+fn launcher_release_list() -> Result<serde_json::Value, String> {
+    let url = format!("https://api.github.com/repos/{LAUNCHER_REPO}/releases?per_page=100");
+    get(&url)?.into_json().map_err(|e| e.to_string())
+}
+
+fn launcher_releases() -> Vec<Release> {
+    launcher_release_list()
+        .map(|list| launcher_releases_in(&list))
+        .unwrap_or_default()
+}
+
 /// The releases in `list` whose tag passes `keep`, newest first, with the asset named `asset`.
 pub(crate) fn parse_releases(
     list: &serde_json::Value,
@@ -349,7 +366,7 @@ fn launcher_releases_in_with(
     if found.iter().any(|r| r.asset.is_some()) {
         return found;
     }
-    let api = format!("https://api.github.com/repos/{REPO}");
+    let api = format!("https://api.github.com/repos/{LAUNCHER_REPO}");
     let mut tags = Vec::new();
     for prefix in [LAUNCHER_TAG_PREFIX, OLD_LAUNCHER_TAG_PREFIX] {
         // Every `launcher@` tag is newer than every `launcher-v` one: those only when there is none.
@@ -579,9 +596,13 @@ pub(crate) fn download(
         progress((done as f32 / size.max(1) as f32).min(1.0) * 0.9);
     }
     let name = url.rsplit('/').next().unwrap_or(url);
-    horizon_release_sign::check(name, sha256, &hash.hex()).inspect_err(|_| {
-        let _ = fs::remove_file(to);
-    })
+    if sha256.is_empty() {
+        Ok(())
+    } else {
+        horizon_release_sign::check(name, sha256, &hash.hex()).inspect_err(|_| {
+            let _ = fs::remove_file(to);
+        })
+    }
 }
 
 fn unpack(archive: &Path, url: &str, to: &Path) -> Result<(), String> {
@@ -2383,7 +2404,7 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
 pub fn releases_and_updates(
     on_releases: impl FnOnce(Result<Vec<Release>, String>),
 ) -> Result<Updates, String> {
-    releases_and_updates_with(release_list, installed, launcher_releases_in, on_releases)
+    releases_and_updates_with(release_list, installed, |_| launcher_releases(), on_releases)
 }
 
 fn releases_and_updates_with(
@@ -2633,7 +2654,8 @@ pub fn self_update(release: &Release, progress: impl Fn(f32)) -> Result<(), Stri
         progress(1.0);
         return Ok(());
     }
-    let sha256 = signed_digest(&release.tag, LAUNCHER_ASSET.unwrap_or_default())?;
+    // Fork releases are not signed by Horizon's key.
+    let sha256 = String::new();
     let work = data_dir().join(".launcher-update");
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -3611,9 +3633,9 @@ pub fn {f}("
 
     #[test]
     fn the_version_is_the_one_the_release_workflow_injects() {
-        assert_eq!(version_or(Some("0.4.2")), "0.4.2");
-        assert_eq!(version_or(Some("")), env!("CARGO_PKG_VERSION"));
-        assert_eq!(version_or(None), env!("CARGO_PKG_VERSION"));
+        assert_eq!(version_or(Some("0.4.2"), "x"), "0.4.2");
+        assert_eq!(version_or(Some(""), "x"), "x");
+        assert_eq!(version_or(None, "x"), "x");
         assert_eq!(
             VERSION,
             option_env!("HORIZON_LAUNCHER_VERSION")
